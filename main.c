@@ -8,8 +8,6 @@
 #include "funcs.h"
 #include "plugin_api.h"
 
-// Команда запуска [[опции] каталог]
-// задание --mac-addr <набор значений>
 
 char *plugins;
 
@@ -56,12 +54,10 @@ void filesRecursively(char *path, int mode)
             {
                 if (mode == 0)
                 {
-//                    fprintf(stdout, "FILE!!!! mode 0 d_name %s\n p %s\n", dp->d_name, p);
                     filesCount++;
                 }
                 else
                 {
-//                    fprintf(stdout, "FILE!!!! mode 1 d_name %s\n p %s\n", dp->d_name, p);
                     files[filesDone] = malloc(sizeof(char) * strlen(p) + 1);
                     files[filesDone] = strcpy(files[filesDone], p);
                     filesDone++;
@@ -151,9 +147,6 @@ int checkPluginPath(char *path, int mode)
                         {
                             char *out_buff = 0;
                             size_t out_buff_len = 0;
-
-//                            for (int i = 0; i < in_opts_len; i++)
-//                                fprintf(stdout, "Opt %s value %s\n", in_opts[i].name, (char *)in_opts[i].flag);
 
                             for (int i = 0; i < filesDone; i++)
                             {
@@ -429,7 +422,7 @@ int main(int argc, char *argv[])
                 break;
 
             case -1:
-                // тут запускаем загрузку плагинов
+                // запускаем загрузку плагинов
 
                 // проверяем наличие каталога
                 if (argv[optind] != NULL)
@@ -496,7 +489,6 @@ int main(int argc, char *argv[])
                 {
                     char *sp = malloc(sizeof(char) * (strlen(searchPath) + 1));
                     sp = strcpy(sp, searchPath);
-//                    sp = strdup(searchPath);
 
                     // ищем и грузим плагины в текущем каталоге
                     if (checkPluginPath(".", 1) != 0)
@@ -511,7 +503,7 @@ int main(int argc, char *argv[])
                 break;
 
             default:
-                fprintf(stdout, "?? getopt возвратило код символа %o ??\n", opt);
+                fprintf(stdout, "getopt возвратило код символа %o\n", opt);
         }
 
     } while (opt >= 0);
