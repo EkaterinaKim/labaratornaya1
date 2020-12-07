@@ -8,6 +8,8 @@
 #include "funcs.h"
 #include "plugin_api.h"
 
+// Команда запуска [[опции] каталог]
+// задание --mac-addr <набор значений>
 
 char *plugins;
 
@@ -53,9 +55,7 @@ void filesRecursively(char *path, int mode)
             else
             {
                 if (mode == 0)
-                {
                     filesCount++;
-                }
                 else
                 {
                     files[filesDone] = malloc(sizeof(char) * strlen(p) + 1);
@@ -153,10 +153,10 @@ int checkPluginPath(char *path, int mode)
                                 int ret = (*plProcFile)(files[i], &in_opts, in_opts_len, out_buff, out_buff_len);
 
                                 if (ret == 0)
-                                    fprintf(stdout, "Файл %s удовлетворяет условиям\n", files[i]);
+                                    fprintf(stdout, "Файл %s удвлетворяет условиям\n", files[i]);
                                 else
                                     if (ret == 1)
-                                        fprintf(stderr, "Файл %s не удовлетворяет условиям\n", files[i]);
+                                        fprintf(stderr, "Файл %s не удвлетворяет условиям\n", files[i]);
                                     else
                                         fprintf(stderr, "Возникла ошибка! Код %d\n", ret);
                             }
@@ -218,27 +218,6 @@ int main(int argc, char *argv[])
     // разбираем параметры
     do
     {
-        /* Что это за структура:
-             struct option {
-             const char *name;
-             int has_arg;
-             int *flag;
-             int val;
-             };
-
-             name
-                является именем длинной опции.
-             has_arg
-                может быть: no_argument (или 0), если опция не имеет аргумента; required_argument (или 1),
-                если опция требует указания аргумента; optional_argument (или 2), если опция может иметь необязательный аргумент.
-             flag
-                задает способ возвращения результатов для длинной опции. Если flag равен NULL, то getopt_long() возвращает val.
-                Hапример, вызывающая программа может назначить val эквивалентом символа короткой опции.
-                В противном случае getopt_long() возвращает 0, а flag указывает на переменную, устанавливаемое значение которой равно val,
-                если опция найдена; и оставляемую без изменений, если опция не найдена.
-             val
-                является возвращаемым значением или загружается в переменную, на которую указывает flag.
-        */
         static struct option long_options[] = {
             {"PluginPath -P", required_argument, NULL, 'P'}, // 0
             {"LogPath -l", required_argument, NULL, 'l'}, // 1
@@ -276,7 +255,6 @@ int main(int argc, char *argv[])
                     fprintf(stdout, " с аргументом %s\n", optarg);
                     if (folderCheck(optarg))
                     {
-//                        logPath = optarg;
                         logPath = strdup(optarg);
 
                         char *fn = malloc(sizeof(char) * (strlen(logPath) + 9));
@@ -389,6 +367,8 @@ int main(int argc, char *argv[])
                             }
                         }
 
+                        optind--;
+
                         fprintf(stdout, "\n");
 
                         if (validateMacAddress(macAddr))
@@ -422,8 +402,6 @@ int main(int argc, char *argv[])
                 break;
 
             case -1:
-                // запускаем загрузку плагинов
-
                 // проверяем наличие каталога
                 if (argv[optind] != NULL)
                 {
@@ -436,6 +414,8 @@ int main(int argc, char *argv[])
                     }
                     else
                     {
+                        fprintf(stdout, "Каталог для поиска: %s\n", searchPath);
+
                         // проверяем заполнен ли мак
                         if (mac == NULL)
                         {
@@ -503,7 +483,7 @@ int main(int argc, char *argv[])
                 break;
 
             default:
-                fprintf(stdout, "getopt возвратило код символа %o\n", opt);
+                fprintf(stdout, "?? getopt возвратило код символа %o ??\n", opt);
         }
 
     } while (opt >= 0);
