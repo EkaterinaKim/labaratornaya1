@@ -3,7 +3,9 @@
 
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <unistd.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 #include "funcs.h"
 #include "plugin_api.h"
@@ -11,23 +13,19 @@
 // Команда запуска [[опции] каталог]
 // задание --mac-addr <набор значений>
 
-char *plugins;
+char **plugins;
+int pluginsDone = 0;
 
 char **files;
 int filesCount = 0, filesDone = 0;
 
-char currentWorkDir[PATH_MAX];
-int pluginsLength = 0;
-
-struct option *in_opts;
+struct option **in_opts;
 size_t in_opts_len = 0;
 
 int logger = 0;
 
 void filesRecursively(char *path, int mode)
 {
-    fprintf(stdout, "Каталог: %s\n", path);
-
     if (path == NULL)
         return;
 
@@ -44,8 +42,8 @@ void filesRecursively(char *path, int mode)
     {
         char *p = malloc(sizeof(char) * (strlen(path) + strlen(dp->d_name) + 2));
         p = strcpy(p, path);
-        p = strncat(p, "/", 1);
-        p = strncat(p, dp->d_name, strlen(dp->d_name));
+        p = strcat(p, "/");
+        p = strcat(p, dp->d_name);
 
         if (strcmp(dp->d_name, ".") != 0  && strcmp(dp->d_name, "..") != 0)
         {
@@ -75,6 +73,9 @@ void filesRecursively(char *path, int mode)
 
 int checkPluginPath(char *path, int mode)
 {
+    if (path == NULL)
+        return -2;
+
     struct dirent *dir;
     DIR *d = opendir(path);
     if (d)
@@ -83,11 +84,12 @@ int checkPluginPath(char *path, int mode)
         {
             char *p1 = strtok(dir->d_name, ".");
             char *p2 = strtok(NULL, ".");
+
             if(p2 != NULL)
             {
                 if (strcmp(p2, "so") == 0)
                 {
-                    fprintf(stdout, "Найден плагин: %s\n", p1);
+                    fprintf(stdout, "\nНайден плагин: %s\n", p1);
 
                     // пробуем прогрузить и опросить
                     int (*plGetInfo)(struct plugin_info *);
@@ -98,73 +100,107 @@ int checkPluginPath(char *path, int mode)
                                       char *,
                                       size_t);
 
-                    struct plugin_info ppi;
+                    struct plugin_info ppi = { 0 };
 
-                    char *error;
-                    char *soPath = strcat(strcat(strcat(currentWorkDir, "/"), dir->d_name), ".so");
+                    char *error = NULL;
 
-                    void *handle = dlopen(soPath, RTLD_LAZY);
+                    char *soPath = malloc(sizeof(char) * (strlen(path) + strlen(dir->d_name) + 5));
+                    soPath = strcpy(soPath, path);
+                    soPath = strcat(soPath, "/");
+                    soPath = strcat(soPath, dir->d_name);
+                    soPath = strcat(soPath, ".so");
+
+                    void *handle = dlopen(soPath, RTLD_LAZY | RTLD_GLOBAL);
                     if (!handle)
                     {
-                        fprintf(stderr, "Ошибка открытия файла %s: %s\n", dir->d_name, dlerror());
+                        fprintf(stderr, "   Ошибка открытия файла %s: %s\n", dir->d_name, dlerror());
                         continue;
                     }
                     else
-                        fprintf(stdout, "Плагин открыт\n");
+                        fprintf(stdout, "   Плагин открыт\n");
 
                     (void) dlerror();
 
                     plGetInfo = (int (*)(struct plugin_info *))dlsym(handle, "plugin_get_info");
                     if ((error = dlerror()) != NULL)
                     {
-                        fprintf(stderr, "Ошибка: %s\n", error);
+                        fprintf(stderr, "   Ошибка: %s\n", error);
                         continue;
                     }
                     else
-                        fprintf(stdout, "Плагин: адрес функции plugin_get_info найден\n");
+                        fprintf(stdout, "   Плагин: адрес функции plugin_get_info найден\n");
 
                     (void) dlerror();
 
                     plProcFile = (int (*)(const char *, struct option *[], size_t, char *, size_t))dlsym(handle, "plugin_process_file");
                     if ((error = dlerror()) != NULL)
                     {
-                        fprintf(stderr, "Ошибка: %s\n", error);
+                        fprintf(stderr, "   Ошибка: %s\n", error);
                         continue;
                     }
                     else
-                        fprintf(stdout, "Плагин: адрес функции plugin_process_file найден\n");
+                        fprintf(stdout, "   Плагин: адрес функции plugin_process_file найден\n");
 
                     int v = (*plGetInfo)(&ppi);
 
                     if (v == 0)
                     {
-                        fprintf(stdout, "Плагин %s можно использовать\n\n", ppi.plugin_name);
+                        fprintf(stdout, "   Плагин %s можно использовать\n", ppi.plugin_name);
 
-                        plugins = strdup(soPath);
-                        pluginsLength++;
+                        if (mode == 0)
+                        {
+                            if (pluginsDone == 0)
+                                plugins = calloc(1, sizeof(char));
+                            else
+                                plugins = realloc(plugins, sizeof (char) * (pluginsDone + 1));
+
+                            plugins[pluginsDone] = malloc(sizeof(char) * strlen(soPath) + 1);
+                            plugins[pluginsDone] = strcpy(plugins[pluginsDone], soPath);
+
+                            pluginsDone++;
+                        }
 
                         if (mode == 1)
                         {
                             char *out_buff = 0;
                             size_t out_buff_len = 0;
+                            int flag = 0;
 
-                            for (int i = 0; i < filesDone; i++)
+                            // проверяем, есть ли среди полученных опций из строки запуска опция текущего плагина
+                            for (int i = 0; i < (int)in_opts_len; i++)
                             {
-                                int ret = (*plProcFile)(files[i], &in_opts, in_opts_len, out_buff, out_buff_len);
-
-                                if (ret == 0)
-                                    fprintf(stdout, "Файл %s удвлетворяет условиям\n", files[i]);
-                                else
-                                    if (ret == 1)
-                                        fprintf(stderr, "Файл %s не удвлетворяет условиям\n", files[i]);
-                                    else
-                                        fprintf(stderr, "Возникла ошибка! Код %d\n", ret);
+                                for (int j = 0; j < (int)ppi.sup_opts_len; j++)
+                                {
+                                    if (strcmp(in_opts[i]->name, ppi.sup_opts[j].opt.name) == 0)
+                                    {
+                                        flag = 1;
+                                        break;
+                                    }
+                                }
                             }
+
+                            if (flag == 1)
+                                for (int i = 0; i < filesDone; i++)
+                                {
+                                    int ret = (*plProcFile)(files[i], in_opts, in_opts_len, out_buff, out_buff_len);
+
+                                    if (ret == 0)
+                                        fprintf(stdout, "Файл %s удвлетворяет условиям\n", files[i]);
+                                    else
+                                        if (ret == 1)
+                                            fprintf(stderr, "Файл %s не удвлетворяет условиям\n", files[i]);
+                                        else
+                                            fprintf(stderr, "Возникла ошибка! Код %d\n", ret);
+                                }
+                            else
+                                fprintf(stderr, "Плагин не поддерживает заданную опцию\n");
 
                         }
                     }
                     else
                         fprintf(stderr, "Ошибка! Плагин вернул код ошибки %d. Использование невозможно.\n", v);
+
+                    free(soPath);
 
                     dlclose(handle);
                 }
@@ -182,14 +218,6 @@ int checkPluginPath(char *path, int mode)
 
 int main(int argc, char *argv[])
 {
-    if (getcwd(currentWorkDir, sizeof(currentWorkDir)) != 0)
-        fprintf(stdout, "Рабочий каталог: %s\n", currentWorkDir);
-    else
-    {
-        fprintf(stderr, "Ошибка определения рабочего каталога\n");
-        return -1;
-    }
-
     int optionsUnion = 1; //  условие объединения опций - по умолчанию AND = true, OR = false
     char *pluginPath = NULL; // доп каталог для плагинов - может быть не заполенено значение
     char *logPath = NULL; // каталог для логов - может быть не заполенено значение
@@ -204,8 +232,6 @@ int main(int argc, char *argv[])
                  " -v                - вывод версии программы\n"
                  " -h                - вывод справки по опциям\n";
 
-    fprintf(stdout, "Параметры, полученные при запуске:\n");
-
     int opt = 0;
     int option_index = 0;
 
@@ -214,6 +240,8 @@ int main(int argc, char *argv[])
     {
         fprintf(stderr, "Ошибка открытия или создания лог-файла\n");
     }
+
+    fprintf(stdout, "Параметры, полученные при запуске:\n");
 
     // разбираем параметры
     do
@@ -259,7 +287,8 @@ int main(int argc, char *argv[])
 
                         char *fn = malloc(sizeof(char) * (strlen(logPath) + 9));
                         fn = strcpy(fn, logPath);
-                        fn = strncat(fn, "/logfile", 8);
+//                        fn = strncat(fn, "/logfile", 8);
+                        fn = strcat(fn, "/logfile");
 
                         if (logger != -1)
                         {
@@ -302,14 +331,16 @@ int main(int argc, char *argv[])
                 if (optionsUnion == 0)
                 {
                     if (in_opts_len == 0)
-                        in_opts = (struct option *) calloc(1, sizeof(struct option));
+                        in_opts = calloc(1, sizeof(struct option));
                     else
-                        in_opts = realloc(in_opts, sizeof (in_opts) * (in_opts_len + 1));
+                        in_opts = realloc(in_opts, sizeof (struct option) * (in_opts_len + 1));
 
-                    in_opts[in_opts_len].name = "Concat";
-                    in_opts[in_opts_len].has_arg = no_argument;
-                    in_opts[in_opts_len].flag = 0;
-                    in_opts[in_opts_len].val = 'C';
+                    in_opts[in_opts_len] = malloc(sizeof(struct option));
+
+                    in_opts[in_opts_len]->name = "Concat";
+                    in_opts[in_opts_len]->has_arg = no_argument;
+                    in_opts[in_opts_len]->flag = 0;
+                    in_opts[in_opts_len]->val = 'C';
 
                     in_opts_len++;
                 }
@@ -320,14 +351,16 @@ int main(int argc, char *argv[])
                 fprintf(stdout, "параметр %s\n", long_options[3].name);
 
                 if (in_opts_len == 0)
-                    in_opts = (struct option *) calloc(1, sizeof(struct option));
+                    in_opts = calloc(1, sizeof(struct option));
                 else
-                    in_opts = realloc(in_opts, sizeof (in_opts) * (in_opts_len + 1));
+                    in_opts = realloc(in_opts, sizeof (struct option) * (in_opts_len + 1));
 
-                in_opts[in_opts_len].name = "Invert";
-                in_opts[in_opts_len].has_arg = no_argument;
-                in_opts[in_opts_len].flag = 0;
-                in_opts[in_opts_len].val = 'N';
+                in_opts[in_opts_len] = malloc(sizeof(struct option));
+
+                in_opts[in_opts_len]->name = "Invert";
+                in_opts[in_opts_len]->has_arg = no_argument;
+                in_opts[in_opts_len]->flag = 0;
+                in_opts[in_opts_len]->val = 'N';
 
                 in_opts_len++;
 
@@ -363,7 +396,8 @@ int main(int argc, char *argv[])
                             if (strlen(argv[optind]) == 2)
                             {
                                 fprintf(stdout, "%s", argv[optind]);
-                                strncat(macAddr, argv[optind], 2);
+//                                strncat(macAddr, argv[optind], 2);
+                                strcat(macAddr, argv[optind]);
                             }
                         }
 
@@ -384,14 +418,16 @@ int main(int argc, char *argv[])
                         fprintf(stdout, " с аргументом %s \n", mac);
 
                         if (in_opts_len == 0)
-                            in_opts = (struct option *) calloc(1, sizeof(struct option));
+                            in_opts = calloc(1, sizeof(struct option));
                         else
                             in_opts = realloc(in_opts, sizeof(struct option) * (in_opts_len + 1));
 
-                        in_opts[in_opts_len].name = "--mac-addr";
-                        in_opts[in_opts_len].has_arg = required_argument;
-                        in_opts[in_opts_len].flag = (int *)mac;
-                        in_opts[in_opts_len].val = 'm';
+                        in_opts[in_opts_len] = malloc(sizeof(struct option));
+
+                        in_opts[in_opts_len]->name = "--mac-addr";
+                        in_opts[in_opts_len]->has_arg = required_argument;
+                        in_opts[in_opts_len]->flag = (int *)mac;
+                        in_opts[in_opts_len]->val = 'm';
 
                         in_opts_len++;
                     }
@@ -429,7 +465,7 @@ int main(int argc, char *argv[])
                         strcpy(sp, searchPath);
                         filesRecursively(searchPath, 0); // считаем сколько файлов
 
-                        fprintf(stdout, "Files count %d\n", filesCount);
+//                        fprintf(stdout, "Files count %d\n", filesCount);
 
                         files = malloc(sizeof(char*) * filesCount + 1); // выделяем память по числу файлов
 
@@ -458,7 +494,10 @@ int main(int argc, char *argv[])
                     fprintf(stdout, "Справка:\n %s \n", help);
                     fprintf(stdout, "Доступные плагины:\n -----------------\n");
 
-                    fprintf(stdout, "%s\n", plugins);
+                    for (int i = 0; i < pluginsDone; i++)
+                    {
+                        fprintf(stdout, "%s\n", plugins[i]);
+                    }
 
                     fprintf(stdout, "-----------------\n");
 
@@ -467,9 +506,6 @@ int main(int argc, char *argv[])
 
                 if (ok == 1)
                 {
-                    char *sp = malloc(sizeof(char) * (strlen(searchPath) + 1));
-                    sp = strcpy(sp, searchPath);
-
                     // ищем и грузим плагины в текущем каталоге
                     if (checkPluginPath(".", 1) != 0)
                         fprintf(stderr, "Ошибка открытия каталога %s\n", ".");
