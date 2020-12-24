@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stddef.h>
+#include <ctype.h>
 
 /*
     Структура, описывающая опцию, поддерживаемую плагином.
@@ -44,16 +45,13 @@ int plugin_get_info(struct plugin_info* ppi)
     if (ppi == NULL)
         return 1;
 
-    ppi->plugin_name = "mac";
+    ppi->plugin_name = "mac-addr";
     ppi->sup_opts_len = 1;
 
     struct plugin_option *po = (struct plugin_option *) calloc(1, sizeof(struct plugin_option));
 
-    po[0].opt.name = "--mac-addr";
+    po[0].opt.name = "mac-addr";
     po[0].opt.has_arg = 1;
-    po[0].opt.flag = 0;
-    po[0].opt.val = 'm';
-
     po[0].opt_descr = "Поиск mac-адреса в файлe";
 
     ppi->sup_opts = po;
@@ -116,46 +114,42 @@ int plugin_process_file(const char *fname,
             *(file + i) = c;
         }
 
-        int includeMac = 1;
-        char *macAddr = 0;
-
-        //    struct option {
-        //        const char *name;
-        //        int         has_arg;
-        //        int        *flag;
-        //        int         val;
-        //    };
-        //    Поле name используется для передачи имени опции, поле flag - для передачи
-        //    значения опции (в виде строки). Если у опции есть аргумент, поле has_arg
-        //    устанавливается в ненулевое значение.
-
-        for (int i = 0; i < (int)in_opts_len; i++)
-        {
-            switch (in_opts[i]->val)
-            {
-                case 'N':
-                    includeMac = 0;
-                    break;
-                case 'm':
-                    macAddr = strdup((char *)in_opts[i]->flag);
-                    break;
-                default: break;
-            }
-
-        }
+        char *macAddr = strdup((char *)in_opts[0]->flag);
+        char *macAddr_forTest = strdup((char *)in_opts[0]->flag);
 
         if (macAddr == NULL)
-            return -2;
+            return -1;
+
+        int j = 0, s = 0;
+
+        // символы должны принадлежать к шестнадцатеричному разряду, т.е. являться одним из: 0 1 2 3 4 5 6 7 8 9 a b c d e f A B C D E F, либо : -
+        while (*macAddr_forTest)
+        {
+            if (isxdigit(*macAddr_forTest))
+                i++;
+            else
+                if (*macAddr_forTest == ':' || *macAddr_forTest == '-')
+                {
+                    if (j == 0 || j / 2 - 1 != s)
+                        break;
+
+                    ++s;
+                }
+                else
+                    s = -1;
+
+            ++macAddr_forTest;
+        }
+
+        if ((j == 12 && (s == 5 || s == 0)) != 0)
+            return -1;
 
         // мак должен быть в файле
-        if (includeMac && (strstr(file, macAddr) != NULL))
-            return 0;
-
-        // мак не должен быть в файле
-        if (!includeMac && (strstr(file, macAddr) == NULL))
+        if (strstr(file, macAddr) != NULL)
             return 0;
 
         fclose(f);
+        free(macAddr);
     }
     else
         return -1;
