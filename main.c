@@ -6,25 +6,47 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <stddef.h>
 
 #include "funcs.h"
 #include "plugin_api.h"
 
 // Команда запуска [[опции] каталог]
-// задание --mac-addr <набор значений>
+// задание --mac-addr <набор значений> каталог
 
-char **plugins;
-int pluginsDone = 0;
+int debugOutputEnabled = 0;
+int optionsUnion = 1; //  условие объединения опций - по умолчанию AND = true, OR = false
+int invert = 0;
 
-char **files;
-int filesCount = 0, filesDone = 0;
+//-------------------------------------
+struct pluginData
+{
+    char *fullPath;
+    void *handle;
+    struct option opt;
+    int optionToUse;
+    int (*plGetInfo)(struct plugin_info *);
+    int (*plProcFile)(const char *,
+                      struct option *[],
+                      size_t,
+                      char *,
+                      size_t);
+};
+struct pluginData **loadedPlugins;
+int loadedPluginsCount = 0;
+//-------------------------------------
 
-struct option **in_opts;
-size_t in_opts_len = 0;
+int logger = -1;
 
-int logger = 0;
+void writeLog(char *message)
+{
+    if (logger == -1)
+        return;
 
-void filesRecursively(char *path, int mode)
+    write(logger, message, sizeof(char) * strlen(message));
+}
+
+void filesRecursively(char *path)
 {
     if (path == NULL)
         return;
@@ -43,23 +65,105 @@ void filesRecursively(char *path, int mode)
         char *p = malloc(sizeof(char) * (strlen(path) + strlen(dp->d_name) + 2));
         p = strcpy(p, path);
         p = strcat(p, "/");
-        p = strcat(p, dp->d_name);
+        p = strcat(p, dp->d_name); // файл или папка
 
         if (strcmp(dp->d_name, ".") != 0  && strcmp(dp->d_name, "..") != 0)
         {
             // дальше по рекурсии идут только папки
             if (folderCheck(p) == true)
-                filesRecursively(p, mode);
+                filesRecursively(p);
             else
             {
-                if (mode == 0)
-                    filesCount++;
-                else
+                // work
+                int result = -1; // переменная для итогового результата
+
+                writeLog("Файл ");
+                writeLog(p);
+                writeLog(". Обработка\n");
+
+                // перебираем все опции из плагинов
+                for (int i = 0; i < loadedPluginsCount; i++)
                 {
-                    files[filesDone] = malloc(sizeof(char) * strlen(p) + 1);
-                    files[filesDone] = strcpy(files[filesDone], p);
-                    filesDone++;
+                    // если опция не помечена как используемая - пропускаем
+                    if (loadedPlugins[i]->optionToUse == 0)
+                        continue;
+
+                    size_t out_buff_len = 255;
+                    char *out_buff = malloc(sizeof (char) * out_buff_len);
+
+                    struct option *opt_tmp[] = { &loadedPlugins[i]->opt };
+
+                    // по каждой опции запускаем чек файла
+                    int ret = loadedPlugins[i]->plProcFile(p, opt_tmp, 1, out_buff, out_buff_len);
+
+                    if (ret == -1) // плагин вернул ошибку
+                    {
+                        writeLog("Плагин ");
+                        writeLog((char *)loadedPlugins[i]->opt.name);
+                        writeLog(". Возникла ошибка!");
+                        writeLog("\n");
+
+                        if (debugOutputEnabled == 1)
+                            fprintf(stderr, "Возникла ошибка! Код %d\n", ret);
+                        continue;
+                    }
+
+                    free(out_buff);
+
+                    // при инверсии мы ищем файлы, которые не подходят
+                    // файл с содержимым нужно отсечь, без содержимого пометить как корректный
+                    if (invert == 1 && ret == 1)
+                        ret = 0;
+                    else
+                    {
+                        if (invert == 1 && ret == 0)
+                            ret = 1;
+                    }
+
+                    // если условие объединения опций AND
+                    // для всех файлов result должен быть 0
+                    if (optionsUnion == 1)
+                    {
+                        if (ret == 0 && result != 1)
+                        {
+                            result = 0;
+                        }
+                        else
+                            result = 1;
+                    }
+                    else
+                    {
+                        // если условие объединения опций OR
+                        // для хотя бы одного файла result должен быть 0
+
+                        if (ret == 0)
+                            result = 0;
+                        else
+                            result = 1;
+                    }
+
                 }
+
+                if (result == 0)
+                {
+                    writeLog("Файл ");
+                    writeLog(p);
+                    writeLog(" удвлетворяет условиям");
+                    writeLog("\n");
+
+                    fprintf(stdout, "Файл %s удвлетворяет условиям\n", p);
+                }
+                else
+                    if (result == 1)
+                    {
+                        writeLog("Файл ");
+                        writeLog(p);
+                        writeLog(" не удвлетворяет условиям");
+                        writeLog("\n");
+
+                        if (debugOutputEnabled == 1)
+                            fprintf(stderr, "Файл %s не удвлетворяет условиям\n", p);
+                    }
             }
         }
 
@@ -71,7 +175,7 @@ void filesRecursively(char *path, int mode)
 
 }
 
-int checkPluginPath(char *path, int mode)
+int checkPluginPath(char *path)
 {
     if (path == NULL)
         return -2;
@@ -89,7 +193,9 @@ int checkPluginPath(char *path, int mode)
             {
                 if (strcmp(p2, "so") == 0)
                 {
-                    fprintf(stdout, "\nНайден плагин: %s\n", p1);
+                    writeLog("Найден плагин: ");
+                    writeLog(p1);
+                    writeLog("\n");
 
                     // пробуем прогрузить и опросить
                     int (*plGetInfo)(struct plugin_info *);
@@ -113,96 +219,112 @@ int checkPluginPath(char *path, int mode)
                     void *handle = dlopen(soPath, RTLD_LAZY | RTLD_GLOBAL);
                     if (!handle)
                     {
-                        fprintf(stderr, "   Ошибка открытия файла %s: %s\n", dir->d_name, dlerror());
+                        writeLog("   Ошибка открытия файла");
+                        writeLog(dir->d_name);
+                        writeLog(dlerror());
+                        writeLog("\n");
+
+                        if (debugOutputEnabled == 1)
+                            fprintf(stderr, "   Ошибка открытия файла: %s %s\n", dir->d_name, dlerror());
+
                         continue;
                     }
                     else
-                        fprintf(stdout, "   Плагин открыт\n");
+                    {
+                        writeLog("   Плагин открыт");
+                        writeLog("\n");
+
+                        if (debugOutputEnabled == 1)
+                            fprintf(stdout, "   Плагин открыт\n");
+                    }
 
                     (void) dlerror();
 
                     plGetInfo = (int (*)(struct plugin_info *))dlsym(handle, "plugin_get_info");
                     if ((error = dlerror()) != NULL)
                     {
-                        fprintf(stderr, "   Ошибка: %s\n", error);
+                        writeLog("   Ошибка ");
+                        writeLog(error);
+                        writeLog("\n");
+
+                        if (debugOutputEnabled == 1)
+                            fprintf(stderr, "   Ошибка: %s\n", error);
+
                         continue;
                     }
                     else
-                        fprintf(stdout, "   Плагин: адрес функции plugin_get_info найден\n");
+                    {
+                        writeLog("   Плагин: адрес функции plugin_get_info найден");
+                        writeLog("\n");
+
+                        if (debugOutputEnabled == 1)
+                            fprintf(stdout, "   Плагин: адрес функции plugin_get_info найден\n");
+                    }
 
                     (void) dlerror();
 
                     plProcFile = (int (*)(const char *, struct option *[], size_t, char *, size_t))dlsym(handle, "plugin_process_file");
                     if ((error = dlerror()) != NULL)
                     {
-                        fprintf(stderr, "   Ошибка: %s\n", error);
+                        writeLog("   Ошибка ");
+                        writeLog(error);
+                        writeLog("\n");
+
+                        if (debugOutputEnabled == 1)
+                            fprintf(stderr, "   Ошибка: %s\n", error);
+
                         continue;
                     }
                     else
-                        fprintf(stdout, "   Плагин: адрес функции plugin_process_file найден\n");
+                    {
+                        writeLog("   Плагин: адрес функции plugin_process_file найден");
+                        writeLog("\n");
+
+                        if (debugOutputEnabled == 1)
+                            fprintf(stdout, "   Плагин: адрес функции plugin_process_file найден\n");
+                    }
 
                     int v = (*plGetInfo)(&ppi);
 
                     if (v == 0)
                     {
-                        fprintf(stdout, "   Плагин %s можно использовать\n", ppi.plugin_name);
+                        writeLog("   Плагин ");
+                        writeLog((char *)ppi.plugin_name);
+                        writeLog(" можно использовать\n");
 
-                        if (mode == 0)
+                        if (debugOutputEnabled == 1)
+                            fprintf(stdout, "   Плагин %s можно использовать\n", ppi.plugin_name);
+
+                        // записываем все опции поддерживаемые плагином
+                        for (int i = 0; i < (int)ppi.sup_opts_len; i++)
                         {
-                            if (pluginsDone == 0)
-                                plugins = calloc(1, sizeof(char));
+                            if (loadedPluginsCount == 0)
+                                loadedPlugins = calloc(1, sizeof(struct pluginData));
                             else
-                                plugins = realloc(plugins, sizeof (char) * (pluginsDone + 1));
+                                loadedPlugins = realloc(loadedPlugins, sizeof(struct pluginData) * (loadedPluginsCount + 1));
 
-                            plugins[pluginsDone] = malloc(sizeof(char) * strlen(soPath) + 1);
-                            plugins[pluginsDone] = strcpy(plugins[pluginsDone], soPath);
+                            loadedPlugins[loadedPluginsCount] = malloc(sizeof(struct pluginData));
+                            loadedPlugins[loadedPluginsCount]->fullPath = strdup(soPath);
+                            loadedPlugins[loadedPluginsCount]->handle = handle;
+                            loadedPlugins[loadedPluginsCount]->plGetInfo = plGetInfo;
+                            loadedPlugins[loadedPluginsCount]->plProcFile = plProcFile;
+                            loadedPlugins[loadedPluginsCount]->opt = ppi.sup_opts[i].opt;
+                            loadedPlugins[loadedPluginsCount]->optionToUse = 0;
 
-                            pluginsDone++;
+                            loadedPluginsCount++;
                         }
 
-                        if (mode == 1)
-                        {
-                            char *out_buff = 0;
-                            size_t out_buff_len = 0;
-                            int flag = 0;
-
-                            // проверяем, есть ли среди полученных опций из строки запуска опция текущего плагина
-                            for (int i = 0; i < (int)in_opts_len; i++)
-                            {
-                                for (int j = 0; j < (int)ppi.sup_opts_len; j++)
-                                {
-                                    if (strcmp(in_opts[i]->name, ppi.sup_opts[j].opt.name) == 0)
-                                    {
-                                        flag = 1;
-                                        break;
-                                    }
-                                }
-                            }
-
-                            if (flag == 1)
-                                for (int i = 0; i < filesDone; i++)
-                                {
-                                    int ret = (*plProcFile)(files[i], in_opts, in_opts_len, out_buff, out_buff_len);
-
-                                    if (ret == 0)
-                                        fprintf(stdout, "Файл %s удвлетворяет условиям\n", files[i]);
-                                    else
-                                        if (ret == 1)
-                                            fprintf(stderr, "Файл %s не удвлетворяет условиям\n", files[i]);
-                                        else
-                                            fprintf(stderr, "Возникла ошибка! Код %d\n", ret);
-                                }
-                            else
-                                fprintf(stderr, "Плагин не поддерживает заданную опцию\n");
-
-                        }
                     }
                     else
-                        fprintf(stderr, "Ошибка! Плагин вернул код ошибки %d. Использование невозможно.\n", v);
+                    {
+                        writeLog("   Ошибка! Использование невозможно. Плагин вернул ошибки ");
+                        writeLog("\n");
+
+                        if (debugOutputEnabled == 1)
+                            fprintf(stderr, "Ошибка! Плагин вернул код ошибки %d. Использование невозможно.\n", v);
+                    }
 
                     free(soPath);
-
-                    dlclose(handle);
                 }
 
             }
@@ -218,11 +340,8 @@ int checkPluginPath(char *path, int mode)
 
 int main(int argc, char *argv[])
 {
-    int optionsUnion = 1; //  условие объединения опций - по умолчанию AND = true, OR = false
     char *pluginPath = NULL; // доп каталог для плагинов - может быть не заполенено значение
-    char *logPath = NULL; // каталог для логов - может быть не заполенено значение
     char *searchPath = NULL;
-    char *mac = NULL;
 
     char *version = "0.0.1";
     char *help = " -P dir            - каталог с плагинами\n"
@@ -235,34 +354,59 @@ int main(int argc, char *argv[])
     int opt = 0;
     int option_index = 0;
 
-    logger = open("./logfile", O_WRONLY | O_APPEND | O_CREAT, 0644);
-    if (logger == -1)
+    // копируем аргументы, чтобы второй проход по ним был корректен
+    char **arguments = calloc(argc, sizeof(char *));
+    for (int i = 0; i < argc; i++)
     {
-        fprintf(stderr, "Ошибка открытия или создания лог-файла\n");
+        arguments[i] = strdup(argv[i]);
     }
 
-    fprintf(stdout, "Параметры, полученные при запуске:\n");
-
-    // разбираем параметры
+    opterr = 0;
+    // ищем в опциях все кроме опций, задающих условие поиска и путь для поиска
     do
     {
-        static struct option long_options[] = {
+        static struct option opts[] = {
             {"PluginPath -P", required_argument, NULL, 'P'}, // 0
             {"LogPath -l", required_argument, NULL, 'l'}, // 1
             {"Concat -C", required_argument, NULL, 'C'}, // 2
             {"Invert -N", no_argument, NULL, 'N'}, // 3
             {"Version -v", no_argument, NULL, 'v'}, // 4
             {"Help -h", no_argument, NULL, 'h'}, // 5
-            {"mac-addr", required_argument, NULL, 'm'}, // 6
+            {"Debug -d", no_argument, NULL, 'd'}, // 6
             {0, 0, 0, 0}
         };
 
-        int ok = 0;
-
-        switch (opt = getopt_long(argc, argv, "P:l:C:Nvh", long_options, &option_index))
+        switch (opt = getopt_long(argc, argv, "P:l:C:Nvhd", opts, &option_index))
         {
+            case 'd':
+                debugOutputEnabled = 1;
+                break;
+            case 'C':
+                if (optarg)
+                {
+                    if (strcasecmp(optarg, "AND") == 0)
+                        optionsUnion = 1;
+                    else
+                        if (strcasecmp(optarg, "OR") == 0)
+                            optionsUnion = 0;
+                        else
+                        {
+                            fprintf(stderr, "Указанное после опции -C значение %s не является корректным\n", optarg);
+                            break;
+                        }
+                }
+                break;
+            case 'N':
+                invert = 1;
+                break;
+            case 'v':
+                fprintf(stdout, "пТекущая версия %s\n", version);
+                break;
+            case 'h':
+                fprintf(stdout, "%s\n", help);
+                break;
             case 'P':
-                fprintf(stdout, "параметр %s", long_options[0].name);
+                fprintf(stdout, "параметр %s", opts[0].name);
                 if (optarg)
                 {
                     fprintf(stdout, " с аргументом %s\n", optarg);
@@ -277,17 +421,12 @@ int main(int argc, char *argv[])
                 break;
 
             case 'l':
-                fprintf(stdout, "параметр %s", long_options[1].name);
                 if (optarg)
                 {
-                    fprintf(stdout, " с аргументом %s\n", optarg);
                     if (folderCheck(optarg))
                     {
-                        logPath = strdup(optarg);
-
-                        char *fn = malloc(sizeof(char) * (strlen(logPath) + 9));
-                        fn = strcpy(fn, logPath);
-//                        fn = strncat(fn, "/logfile", 8);
+                        char *fn = malloc(sizeof(char) * (strlen(optarg) + 9));
+                        fn = strcpy(fn, optarg);
                         fn = strcat(fn, "/logfile");
 
                         if (logger != -1)
@@ -295,11 +434,13 @@ int main(int argc, char *argv[])
                             close(logger);
                         }
 
-                        logger = open(fn, O_WRONLY | O_APPEND | O_CREAT, 0644);
+                        logger = open(fn, O_WRONLY | O_TRUNC | O_CREAT, 0644);
                         if (logger == -1)
                         {
                             fprintf(stderr, "Ошибка открытия или создания лог-файла по указанному пути\n");
                         }
+                        else
+                            writeLog("Log open\n");
 
                         free(fn);
                     }
@@ -309,231 +450,123 @@ int main(int argc, char *argv[])
                 else
                     fprintf(stderr, "После опции -l не указан каталог\n");
                 break;
+            case -1:
+                break;
+            case 1:
+                break;
+            case '?':
+                break;
+        }
+    } while (opt >= 0);
 
-            case 'C':
-                fprintf(stdout, "параметр %s", long_options[2].name);
-                if (optarg)
-                    fprintf(stdout, " с аргументом %s\n", optarg);
+    // ищем и грузим плагины в текущем каталоге
+    if (checkPluginPath(".") != 0)
+        fprintf(stderr, "Ошибка открытия каталога %s\n", ".");
 
-                if (strcasecmp(optarg, "AND") == 0)
-                    optionsUnion = 1;
-                else
-                    if (strcasecmp(optarg, "OR") == 0)
-                        optionsUnion = 0;
-                    else
-                    {
-                        fprintf(stderr, "Указанное после опции -C значение %s не является корректным\n", optarg);
-                        break;
-                    }
+    // ищем и грузим плагины в заданном опцией каталоге
+    if (pluginPath != NULL)
+        if (checkPluginPath(pluginPath) != 0)
+            fprintf(stderr, "Ошибка открытия каталога %s\n", pluginPath);
 
-                fprintf(stdout, " \n");
+    // ищем путь для поиска
+    if (folderCheck(argv[argc - 1]))
+        searchPath = strdup(argv[argc - 1]);
+    else
+    {
+        fprintf(stderr, "Путь для поиска не является каталогом или каталог для поиска не указан\n");
+        fprintf(stdout, "Справка:\n %s \n", help);
+        fprintf(stdout, "Доступные плагины:\n -----------------\n");
 
-                if (optionsUnion == 0)
+        for (int i = 0; i < (int)loadedPluginsCount; i++)
+        {
+            fprintf(stdout, "%s\n", loadedPlugins[i]->fullPath);
+        }
+
+        fprintf(stdout, "-----------------\n");
+        return 1;
+    }
+
+    opt = 0;
+    optind = 0;
+
+    struct option *long_options_only = calloc(loadedPluginsCount + 1, sizeof(struct option));
+    for (int i = 0; i < (int)loadedPluginsCount; i++)
+    {
+        long_options_only[i].name = loadedPlugins[i]->opt.name;
+        long_options_only[i].has_arg = loadedPlugins[i]->opt.has_arg;
+        long_options_only[i].flag = NULL;
+        long_options_only[i].val = 0;
+    }
+    long_options_only[loadedPluginsCount].name = NULL;
+    long_options_only[loadedPluginsCount].has_arg = no_argument;
+    long_options_only[loadedPluginsCount].flag = NULL;
+    long_options_only[loadedPluginsCount].val = 0;
+
+    do
+    {
+        option_index = -1;
+
+        switch (opt = getopt_long_only(argc, arguments, "", long_options_only, &option_index))
+        {
+            case 0:
+//                fprintf(stdout, "1getopt возвратило %s ??\n", long_options_only[option_index].name);
+                for (int i = 0; i < loadedPluginsCount; i++)
                 {
-                    if (in_opts_len == 0)
-                        in_opts = calloc(1, sizeof(struct option));
-                    else
-                        in_opts = realloc(in_opts, sizeof (struct option) * (in_opts_len + 1));
-
-                    in_opts[in_opts_len] = malloc(sizeof(struct option));
-
-                    in_opts[in_opts_len]->name = "Concat";
-                    in_opts[in_opts_len]->has_arg = no_argument;
-                    in_opts[in_opts_len]->flag = 0;
-                    in_opts[in_opts_len]->val = 'C';
-
-                    in_opts_len++;
-                }
-
-                break;
-
-            case 'N':
-                fprintf(stdout, "параметр %s\n", long_options[3].name);
-
-                if (in_opts_len == 0)
-                    in_opts = calloc(1, sizeof(struct option));
-                else
-                    in_opts = realloc(in_opts, sizeof (struct option) * (in_opts_len + 1));
-
-                in_opts[in_opts_len] = malloc(sizeof(struct option));
-
-                in_opts[in_opts_len]->name = "Invert";
-                in_opts[in_opts_len]->has_arg = no_argument;
-                in_opts[in_opts_len]->flag = 0;
-                in_opts[in_opts_len]->val = 'N';
-
-                in_opts_len++;
-
-                break;
-
-            case 'v':
-                fprintf(stdout, "параметр %s. Текущая версия %s\n", long_options[4].name, version);
-                break;
-
-            case 'h':
-                fprintf(stdout, "параметр %s\n%s\n", long_options[5].name, help);
-                break;
-
-            case 'm':
-                // параметр mac-addr
-                if (optarg)
-                {
-                    fprintf(stdout, "параметр %s ", long_options[6].name);
-
-                    if (validateMacAddress(optarg))
+                    if (strcmp(loadedPlugins[i]->opt.name, long_options_only[option_index].name) == 0)
                     {
-                        mac = strdup(optarg);
-                    }
-                    else
-                    {
-                        // пробуем посмотреть что дальше в строке, если мак записан как 6 групп по 2 символа
-                        // объединяем их в одну строку и проверяем
-                        // иначе кидаем ошибку проверки мака
-                        optind--;
-                        char *macAddr = 0;
-                        for(int i = 0; optind < argc && *argv[optind] != '-' && i < 6; optind++, i++)
+                        loadedPlugins[i]->optionToUse = 1;
+
+                        if (loadedPlugins[i]->opt.has_arg == required_argument && optarg)
                         {
-                            if (strlen(argv[optind]) == 2)
+                            if (strlen(optarg) > 2)
+                                loadedPlugins[i]->opt.flag = (int *)optarg;
+                            else
                             {
-                                fprintf(stdout, "%s", argv[optind]);
-//                                strncat(macAddr, argv[optind], 2);
-                                strcat(macAddr, argv[optind]);
+                                optind--;
+                                char *opt = calloc(12, sizeof(char));
+                                for(int i = 0; optind < argc && *arguments[optind] != '-' && i < 6; optind++, i++)
+                                {
+                                    if (strlen(arguments[optind]) == 2)
+                                    {
+                                        strcat(opt, arguments[optind]);
+                                    }
+                                }
+                                optind--;
+
+                                loadedPlugins[i]->opt.flag = (int *)opt;
+                                free(opt);
                             }
                         }
 
-                        optind--;
-
-                        fprintf(stdout, "\n");
-
-                        if (validateMacAddress(macAddr))
-                        {
-                            mac = strdup(macAddr);
-                        }
-                        else
-                            fprintf(stderr, "Аргумент не является mac-адресом\n\n");
-                    }
-
-                    if (mac != NULL)
-                    {
-                        fprintf(stdout, " с аргументом %s \n", mac);
-
-                        if (in_opts_len == 0)
-                            in_opts = calloc(1, sizeof(struct option));
-                        else
-                            in_opts = realloc(in_opts, sizeof(struct option) * (in_opts_len + 1));
-
-                        in_opts[in_opts_len] = malloc(sizeof(struct option));
-
-                        in_opts[in_opts_len]->name = "--mac-addr";
-                        in_opts[in_opts_len]->has_arg = required_argument;
-                        in_opts[in_opts_len]->flag = (int *)mac;
-                        in_opts[in_opts_len]->val = 'm';
-
-                        in_opts_len++;
-                    }
-                }
-                else
-                    fprintf(stderr, "После опции --mac-addr не указан аргумент\n");
-
-                break;
-
-            case -1:
-                // проверяем наличие каталога
-                if (argv[optind] != NULL)
-                {
-                    searchPath = strdup(argv[optind]);
-
-                    if (!folderCheck(searchPath))
-                    {
-                        fprintf(stderr, "Не является каталогом\n");
                         break;
                     }
-                    else
-                    {
-                        fprintf(stdout, "Каталог для поиска: %s\n", searchPath);
 
-                        // проверяем заполнен ли мак
-                        if (mac == NULL)
-                        {
-                            fprintf(stderr, "МАС-адрес не заполнен или некорректен\n");
-                            break;
-                        }
-
-                        // ищем мак по файлам
-
-                        char *sp = malloc(strlen(searchPath) + 1);
-                        strcpy(sp, searchPath);
-                        filesRecursively(searchPath, 0); // считаем сколько файлов
-
-//                        fprintf(stdout, "Files count %d\n", filesCount);
-
-                        files = malloc(sizeof(char*) * filesCount + 1); // выделяем память по числу файлов
-
-                        filesRecursively(sp, 1); // заполняем массив путей к файлам
-
-                        free(sp);
-
-                    }
-
-                    ok = 1;
                 }
-                else
-                {
-                    // Если каталога нет - выводим ошибку, справку по опциям и доступным плагинам и выходим
-
-                    // ищем и грузим плагины в текущем каталоге
-                    if (checkPluginPath(".", 0) != 0)
-                        fprintf(stderr, "Ошибка открытия каталога %s\n", ".");
-
-                    // ищем и грузим плагины в заданном опцией каталоге
-                    if (pluginPath != NULL)
-                        if (checkPluginPath(pluginPath, 0) != 0)
-                            fprintf(stderr, "Ошибка открытия каталога %s\n", pluginPath);
-
-                    fprintf(stderr, "\n\nНе указан каталог для поиска\n");
-                    fprintf(stdout, "Справка:\n %s \n", help);
-                    fprintf(stdout, "Доступные плагины:\n -----------------\n");
-
-                    for (int i = 0; i < pluginsDone; i++)
-                    {
-                        fprintf(stdout, "%s\n", plugins[i]);
-                    }
-
-                    fprintf(stdout, "-----------------\n");
-
-                    break;
-                }
-
-                if (ok == 1)
-                {
-                    // ищем и грузим плагины в текущем каталоге
-                    if (checkPluginPath(".", 1) != 0)
-                        fprintf(stderr, "Ошибка открытия каталога %s\n", ".");
-
-                    // ищем и грузим плагины в заданном опцией каталоге
-                    if (pluginPath != NULL)
-                        if (checkPluginPath(pluginPath, 1) != 0)
-                            fprintf(stderr, "Ошибка открытия каталога %s\n", pluginPath);
-                }
-
                 break;
-
             default:
-                fprintf(stdout, "?? getopt возвратило код символа %o ??\n", opt);
+                break;
         }
 
     } while (opt >= 0);
 
-    fprintf(stdout, "Очистка\n");
+    filesRecursively(searchPath);
+
+    writeLog("Очистка\n");
+
+    for (int i = 0;i < (int)loadedPluginsCount; i++)
+        dlclose(loadedPlugins[i]->handle);
+
+    free(searchPath);
+
+    for(int i = 0; i < argc; i++)
+        free(arguments[i]);
+
+    free(arguments);
+
+    writeLog("Очистка завершена\n");
 
     if (logger != -1)
-    {
         close(logger);
-    }
-
-    free(plugins);
-    free(mac);
-    free(searchPath);
 
     return 0;
 }
