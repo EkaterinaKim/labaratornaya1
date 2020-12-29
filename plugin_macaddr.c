@@ -4,7 +4,6 @@
 #include <string.h>
 #include <stddef.h>
 #include <ctype.h>
-
 /*
     Структура, описывающая опцию, поддерживаемую плагином.
 */
@@ -45,13 +44,16 @@ int plugin_get_info(struct plugin_info* ppi)
     if (ppi == NULL)
         return 1;
 
-    ppi->plugin_name = "mac-addr";
+    ppi->plugin_name = "mac";
     ppi->sup_opts_len = 1;
 
     struct plugin_option *po = (struct plugin_option *) calloc(1, sizeof(struct plugin_option));
 
     po[0].opt.name = "mac-addr";
     po[0].opt.has_arg = 1;
+    po[0].opt.flag = 0;
+    po[0].opt.val = 'm';
+
     po[0].opt_descr = "Поиск mac-адреса в файлe";
 
     ppi->sup_opts = po;
@@ -113,20 +115,24 @@ int plugin_process_file(const char *fname,
         {
             *(file + i) = c;
         }
+        fclose(f);
 
         char *macAddr = strdup((char *)in_opts[0]->flag);
-        char *macAddr_forTest = strdup((char *)in_opts[0]->flag);
 
         if (macAddr == NULL)
+        {
+            sprintf(out_buff, "Мac-адрес не заполнен");
             return -1;
+        }
 
+        char *macAddr_forTest = strdup((char *)in_opts[0]->flag);
         int j = 0, s = 0;
 
         // символы должны принадлежать к шестнадцатеричному разряду, т.е. являться одним из: 0 1 2 3 4 5 6 7 8 9 a b c d e f A B C D E F, либо : -
         while (*macAddr_forTest)
         {
             if (isxdigit(*macAddr_forTest))
-                i++;
+                j++;
             else
                 if (*macAddr_forTest == ':' || *macAddr_forTest == '-')
                 {
@@ -141,18 +147,23 @@ int plugin_process_file(const char *fname,
             ++macAddr_forTest;
         }
 
-        if ((j == 12 && (s == 5 || s == 0)) != 0)
+        if ((j == 12 && (s == 5 || s == 0)) == 0)
+        {
+            sprintf(out_buff, "Не является mac-адресом");
             return -1;
+        }
 
         // мак должен быть в файле
         if (strstr(file, macAddr) != NULL)
             return 0;
 
-        fclose(f);
-        free(macAddr);
     }
     else
+    {
+        sprintf(out_buff, "Ошибка открытия файла");
         return -1;
+    }
+
 
     return 1;
 }

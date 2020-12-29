@@ -18,6 +18,8 @@ int debugOutputEnabled = 0;
 int optionsUnion = 1; //  условие объединения опций - по умолчанию AND = true, OR = false
 int invert = 0;
 
+int any_result = 0;
+
 //-------------------------------------
 struct pluginData
 {
@@ -37,6 +39,12 @@ int loadedPluginsCount = 0;
 //-------------------------------------
 
 int logger = -1;
+
+void closeLog()
+{
+    if (logger != -1)
+        close(logger);
+}
 
 void writeLog(char *message)
 {
@@ -100,11 +108,17 @@ void filesRecursively(char *path)
                     {
                         writeLog("Плагин ");
                         writeLog((char *)loadedPlugins[i]->opt.name);
-                        writeLog(". Возникла ошибка!");
+                        writeLog(". Возникла ошибка! ");
+                        writeLog(out_buff);
+                        writeLog(". Передаваемое значение ");
+                        writeLog((char *)loadedPlugins[i]->opt.flag);
                         writeLog("\n");
 
                         if (debugOutputEnabled == 1)
-                            fprintf(stderr, "Возникла ошибка! Код %d\n", ret);
+                            fprintf(stderr, "Плагин %s. Возникла ошибка! %s . Передаваемое значение %s.\n",
+                                        (char *)loadedPlugins[i]->opt.name,
+                                        out_buff,
+                                        (char *)loadedPlugins[i]->opt.flag);
                         continue;
                     }
 
@@ -152,6 +166,8 @@ void filesRecursively(char *path)
                     writeLog("\n");
 
                     fprintf(stdout, "Файл %s удвлетворяет условиям\n", p);
+
+                    any_result = 1;
                 }
                 else
                     if (result == 1)
@@ -196,6 +212,9 @@ int checkPluginPath(char *path)
                     writeLog("Найден плагин: ");
                     writeLog(p1);
                     writeLog("\n");
+
+                    if (debugOutputEnabled == 1)
+                        fprintf(stdout, "Найден плагин: %s\n", p1);
 
                     // пробуем прогрузить и опросить
                     int (*plGetInfo)(struct plugin_info *);
@@ -291,9 +310,13 @@ int checkPluginPath(char *path)
                         writeLog("   Плагин ");
                         writeLog((char *)ppi.plugin_name);
                         writeLog(" можно использовать\n");
+                        writeLog("       Доступные опции: \n");
 
                         if (debugOutputEnabled == 1)
+                        {
                             fprintf(stdout, "   Плагин %s можно использовать\n", ppi.plugin_name);
+                            fprintf(stdout, "       Доступные опции: \n");
+                        }
 
                         // записываем все опции поддерживаемые плагином
                         for (int i = 0; i < (int)ppi.sup_opts_len; i++)
@@ -302,6 +325,17 @@ int checkPluginPath(char *path)
                                 loadedPlugins = calloc(1, sizeof(struct pluginData));
                             else
                                 loadedPlugins = realloc(loadedPlugins, sizeof(struct pluginData) * (loadedPluginsCount + 1));
+
+                            writeLog("          ");
+                            writeLog((char *)ppi.sup_opts[i].opt.name);
+                            writeLog(" требует аргумент: ");
+                            writeLog(ppi.sup_opts[i].opt.has_arg == 0 ? "нет" : "да");
+                            writeLog("\n");
+
+                            if (debugOutputEnabled == 1)
+                            {
+                                fprintf(stdout, "          %s требует аргумент: %s\n", (char *)ppi.sup_opts[i].opt.name, ppi.sup_opts[i].opt.has_arg == 0 ? "нет" : "да");
+                            }
 
                             loadedPlugins[loadedPluginsCount] = malloc(sizeof(struct pluginData));
                             loadedPlugins[loadedPluginsCount]->fullPath = strdup(soPath);
@@ -341,7 +375,9 @@ int checkPluginPath(char *path)
 int main(int argc, char *argv[])
 {
     char *pluginPath = NULL; // доп каталог для плагинов - может быть не заполенено значение
-    char *searchPath = NULL;
+    char *searchPath = strdup(argv[argc - 1]);
+    argv[argc - 1] = NULL;
+    --argc;
 
     char *version = "0.0.1";
     char *help = " -P dir            - каталог с плагинами\n"
@@ -349,7 +385,8 @@ int main(int argc, char *argv[])
                  " -C cond           - условие объединения опций. возможные значения AND, OR. значение по умолчанию AND\n"
                  " -N                - инвертирование условий поиска\n"
                  " -v                - вывод версии программы\n"
-                 " -h                - вывод справки по опциям\n";
+                 " -h                - вывод справки по опциям\n"
+                 " -d                - вывод всей информации\n";
 
     int opt = 0;
     int option_index = 0;
@@ -376,7 +413,7 @@ int main(int argc, char *argv[])
             {0, 0, 0, 0}
         };
 
-        switch (opt = getopt_long(argc, argv, "P:l:C:Nvhd", opts, &option_index))
+        switch (opt = getopt_long(argc, argv, "-:P:l:C:Nvhd", opts, &option_index))
         {
             case 'd':
                 debugOutputEnabled = 1;
@@ -391,9 +428,22 @@ int main(int argc, char *argv[])
                             optionsUnion = 0;
                         else
                         {
-                            fprintf(stderr, "Указанное после опции -C значение %s не является корректным\n", optarg);
-                            break;
+                            writeLog("Указанное после опции -C значение ");
+                            writeLog(optarg);
+                            writeLog(" не является корректным. Работа программы будет остановлена.\n");
+                            fprintf(stderr, "Указанное после опции -C значение %s не является корректным. Работа программы будет остановлена.\n", optarg);
+                            closeLog();
+                            exit(671);
                         }
+                }
+                else
+                {
+                    writeLog("Опция -С требует аргумент.Работа программы будет остановлена.\n");
+                    fprintf(stderr, "Опция -С требует аргумент. Работа программы будет остановлена.\n");
+
+                    closeLog();
+
+                    exit(67);
                 }
                 break;
             case 'N':
@@ -406,18 +456,28 @@ int main(int argc, char *argv[])
                 fprintf(stdout, "%s\n", help);
                 break;
             case 'P':
-                fprintf(stdout, "параметр %s", opts[0].name);
+//                fprintf(stdout, "параметр %s", opts[0].name);
                 if (optarg)
                 {
-                    fprintf(stdout, " с аргументом %s\n", optarg);
+//                    fprintf(stdout, " с аргументом %s\n", optarg);
 
                     if (folderCheck(optarg))
                         pluginPath = optarg;
                     else
-                        fprintf(stderr, "Аргумент не является каталогом\n");
+                    {
+                        fprintf(stderr, "Аргумент не является каталогом. Работа программы будет остановлена.\n");
+                        writeLog("Аргумент не является каталогом. Работа программы будет остановлена.\n");
+                        closeLog();
+                        exit(801);
+                    }
                 }
                 else
-                    fprintf(stderr, "После опции -Р не указан каталог\n");
+                {
+                    writeLog("После опции -Р не указан каталог. Работа программы будет остановлена.\n");
+                    fprintf(stderr, "После опции -Р не указан каталог. Работа программы будет остановлена.\n");
+                    closeLog();
+                    exit(80);
+                }
                 break;
 
             case 'l':
@@ -445,15 +505,24 @@ int main(int argc, char *argv[])
                         free(fn);
                     }
                     else
-                        fprintf(stderr, "Аргумент не является каталогом\n");
+                    {
+                        fprintf(stderr, "Аргумент не является каталогом. Требуется ввести путь к папке, в которой будет создан лог-файл.. Работа программы будет остановлена.\n");
+                        exit(1081);
+                    }
                 }
                 else
-                    fprintf(stderr, "После опции -l не указан каталог\n");
+                {
+                    fprintf(stderr, "После опции -l не указан каталог. Создание лог-файла невозможно. Работа программы будет остановлена.\n");
+                    exit(108);
+                }
                 break;
             case -1:
                 break;
             case 1:
                 break;
+            case ':':
+                fprintf(stderr, "Одна из опций с обязательным аргументом указана без него.\n");
+                exit(58);
             case '?':
                 break;
         }
@@ -469,9 +538,7 @@ int main(int argc, char *argv[])
             fprintf(stderr, "Ошибка открытия каталога %s\n", pluginPath);
 
     // ищем путь для поиска
-    if (folderCheck(argv[argc - 1]))
-        searchPath = strdup(argv[argc - 1]);
-    else
+    if (!folderCheck(searchPath))
     {
         fprintf(stderr, "Путь для поиска не является каталогом или каталог для поиска не указан\n");
         fprintf(stdout, "Справка:\n %s \n", help);
@@ -479,7 +546,7 @@ int main(int argc, char *argv[])
 
         for (int i = 0; i < (int)loadedPluginsCount; i++)
         {
-            fprintf(stdout, "%s\n", loadedPlugins[i]->fullPath);
+            fprintf(stdout, "%s, опция %s\n", loadedPlugins[i]->fullPath, loadedPlugins[i]->opt.name);
         }
 
         fprintf(stdout, "-----------------\n");
@@ -501,6 +568,9 @@ int main(int argc, char *argv[])
     long_options_only[loadedPluginsCount].has_arg = no_argument;
     long_options_only[loadedPluginsCount].flag = NULL;
     long_options_only[loadedPluginsCount].val = 0;
+
+//    for (int i = 0; i < argc; i++)
+//        fprintf(stdout, "%s\n", arguments[i]);
 
     do
     {
@@ -537,12 +607,25 @@ int main(int argc, char *argv[])
                                 free(opt);
                             }
                         }
+                        else
+                        {
+                            if (debugOutputEnabled == 1)
+                                fprintf(stderr, "Длинная опция %s требует аргумент. Выход.\n", long_options_only[option_index].name);
+
+                            writeLog("Длинная опция ");
+                            writeLog((char *)long_options_only[option_index].name);
+                            writeLog(" требует аргумент. Выход.\n");
+                            exit(100);
+                        }
 
                         break;
                     }
 
                 }
                 break;
+            case ':':
+                fprintf(stderr, "Одна из опций, поддерживаемых лагином с обязательным аргументом указана без него.\n");
+                exit(581);
             default:
                 break;
         }
@@ -551,7 +634,12 @@ int main(int argc, char *argv[])
 
     filesRecursively(searchPath);
 
+    if (any_result == 0)
+        fprintf(stdout, "Файлов, удвлетворяющих условиям поиска, не найдено\n");
+
     writeLog("Очистка\n");
+    if (debugOutputEnabled == 1)
+        fprintf(stdout, "Очистка\n");
 
     for (int i = 0;i < (int)loadedPluginsCount; i++)
         dlclose(loadedPlugins[i]->handle);
@@ -564,9 +652,10 @@ int main(int argc, char *argv[])
     free(arguments);
 
     writeLog("Очистка завершена\n");
+    if (debugOutputEnabled == 1)
+        fprintf(stdout, "Очистка завершена\n");
 
-    if (logger != -1)
-        close(logger);
+    closeLog();
 
     return 0;
 }

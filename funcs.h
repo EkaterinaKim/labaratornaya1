@@ -18,7 +18,8 @@ bool folderCheck(char *path)
     int err = stat(path, &s);
     if(-1 != err)
     {
-        if(S_ISDIR(s.st_mode))
+//        if(S_ISDIR(s.st_mode))
+        if(S_IFDIR & s.st_mode)
             return true;
     }
 
