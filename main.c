@@ -413,7 +413,7 @@ int main(int argc, char *argv[])
             {0, 0, 0, 0}
         };
 
-        switch (opt = getopt_long(argc, argv, "-:P:l:C:Nvhd", opts, &option_index))
+        switch (opt = getopt_long(argc, argv, "-P:l:C:Nvhd", opts, &option_index))
         {
             case 'd':
                 debugOutputEnabled = 1;
